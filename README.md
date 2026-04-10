@@ -46,17 +46,18 @@ MCP server for the [ClinGen API platform](https://doi.org/10.1016/j.xgen.2026.10
 
 ### Install
 ```bash
-cd /Users/Sean/mcp-servers/clingen-mcp
+git clone https://github.com/dsh1201/clingen-mcp
+cd clingen-mcp
 npm install
 npm run build
 
 # Add to Claude Code
-claude mcp add clingen-mcp node /Users/Sean/mcp-servers/clingen-mcp/dist/index.js
+claude mcp add clingen-mcp node $(pwd)/dist/index.js
 ```
 
 ### Test
 ```bash
-npm run build && npm test
+npm test
 ```
 
 ### Rebuild after edits
