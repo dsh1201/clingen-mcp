@@ -419,7 +419,7 @@ server.registerTool(
 // ERepo – Evidence Repository
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Fields to strip in compact mode — these are verbose and rarely needed for overview queries
+// Fields to strip in compact mode — verbose and rarely needed for overview queries
 const EREPO_VERBOSE_FIELDS = new Set([
   "summaryDesc",      // full classification rationale text (can be 10KB+ per record)
   "versionsList",     // historical version objects
@@ -428,17 +428,32 @@ const EREPO_VERBOSE_FIELDS = new Set([
   "PCERDocID",        // internal submission ID
   "geneNcbiId",       // redundant with gene symbol
   "mondoId",          // redundant with condition
+  "affiliationId",    // internal org ID (ep label is sufficient)
+  "docVersion",       // internal doc version number
+  "uuid",             // redundant with _key
+  "moi",              // mode of inheritance (rarely needed in summary)
+]);
+
+// The minimal set of fields returned in compact mode
+const EREPO_COMPACT_KEEP = new Set([
+  "_key", "caId", "cvId", "gene",
+  "classification", "condition",
+  "preferredVarTitle", "hgvs",
+  "metCodes", "unMetCodes",
+  "publishedDate", "approvedDate",
+  "ep", "retracted",
 ]);
 
 type ERepoRecord = Record<string, unknown>;
 
 function compactErepoRecord(record: ERepoRecord): ERepoRecord {
   const out: ERepoRecord = {};
-  for (const [k, v] of Object.entries(record)) {
-    if (EREPO_VERBOSE_FIELDS.has(k)) continue;
-    // Trim hgvs array to first 3 entries only
+  for (const k of EREPO_COMPACT_KEEP) {
+    if (!(k in record)) continue;
+    const v = record[k];
+    // Keep only the first HGVS entry to save space
     if (k === "hgvs" && Array.isArray(v)) {
-      out[k] = (v as unknown[]).slice(0, 3);
+      out[k] = (v as unknown[]).slice(0, 1);
     } else {
       out[k] = v;
     }
@@ -446,21 +461,34 @@ function compactErepoRecord(record: ERepoRecord): ERepoRecord {
   return out;
 }
 
+/** Check if any HGVS string in the record matches the given substring/pattern */
+function hgvsMatches(record: ERepoRecord, pattern: string): boolean {
+  const re = new RegExp(pattern, "i");
+  const hgvsArr = record["hgvs"];
+  if (Array.isArray(hgvsArr)) {
+    return (hgvsArr as string[]).some((h) => re.test(h));
+  }
+  const title = record["preferredVarTitle"];
+  if (typeof title === "string") return re.test(title);
+  return false;
+}
+
 server.registerTool(
   "erepo_query_classifications",
   {
     description:
       "Query the ClinGen Evidence Repository (ERepo) for expert-curated variant " +
-      "classifications. Supports filtering by gene symbol, HGVS notation, CAid, " +
-      "ClinVar variation ID, expert panel name, disease/condition, or ACMG assertion. " +
-      "By default returns compact records with key fields only: caId, gene, hgvs, " +
-      "classification, condition, metCodes (applied ACMG/AMP criteria), unMetCodes, " +
-      "publishedDate. Set compact=false to include full summaryDesc rationale text. " +
-      "Use erepo_get_classification for one record's full detail. " +
-      "ERepo contains 12,000+ curated variants across 140+ genes.",
+      "classifications. Filters by gene, HGVS, CAid, ClinVar ID, expert panel, " +
+      "condition, or ACMG assertion. " +
+      "Returns compact records by default (caId, gene, preferredVarTitle, hgvs[0], " +
+      "classification, condition, metCodes, unMetCodes, publishedDate). " +
+      "Use hgvs_contains to filter results by HGVS substring or regex — e.g. " +
+      "'exon1' patterns like 'c\\.1[0-9]{0,2}[+-]' or 'c\\.[1-9]\\d?[^0-9]' for early-coding variants. " +
+      "Use result_limit to cap returned matches (default 10). " +
+      "Use erepo_get_classification for one record's full detail including summaryDesc.",
     inputSchema: {
-      gene: z.string().optional().describe("Gene symbol, e.g. 'BRCA1'"),
-      hgvs: z.string().optional().describe("HGVS expression, e.g. 'NM_007294.4:c.5266dup'"),
+      gene: z.string().optional().describe("Gene symbol, e.g. 'BRCA2'"),
+      hgvs: z.string().optional().describe("Exact HGVS expression for server-side lookup"),
       caid: z.string().optional().describe("CAid, e.g. 'CA023232'"),
       variation_id: z.string().optional().describe("ClinVar variation ID"),
       expert_panel: z.string().optional().describe("Expert panel name (partial match)"),
@@ -470,30 +498,36 @@ server.registerTool(
                "Likely benign", "Benign"])
         .optional()
         .describe("ACMG/AMP classification assertion"),
-      limit: z
+      hgvs_contains: z
+        .string()
+        .optional()
+        .describe(
+          "Client-side HGVS filter: substring or regex applied to each record's hgvs array. " +
+          "Examples: 'exon1', 'c\\.67', 'del', 'c\\.[1-9]\\d?[^0-9]' (small c. positions ≈ exon 1)"
+        ),
+      fetch_limit: z
         .number()
         .int()
         .min(1)
-        .max(200)
-        .default(20)
-        .describe("Maximum number of results (default 20, max 200)"),
-      offset: z
+        .max(500)
+        .default(100)
+        .describe("How many records to fetch from server before client-side filtering (default 100)"),
+      result_limit: z
         .number()
         .int()
-        .min(0)
-        .default(0)
-        .describe("Pagination offset"),
+        .min(1)
+        .max(50)
+        .default(10)
+        .describe("Maximum records to return after all filtering (default 10)"),
       compact: z
         .boolean()
         .default(true)
-        .describe(
-          "If true (default), strips verbose fields (summaryDesc, versionsList, etc.) " +
-          "to keep response small. Set false only when you need full rationale text."
-        ),
+        .describe("Strip verbose fields (summaryDesc etc.). Set false only when needed."),
     },
   },
-  async ({ gene, hgvs, caid, variation_id, expert_panel, condition, assertion, limit, offset, compact }) => {
-    const params: Record<string, string | number | undefined> = { limit, offset };
+  async ({ gene, hgvs, caid, variation_id, expert_panel, condition, assertion,
+           hgvs_contains, fetch_limit, result_limit, compact }) => {
+    const params: Record<string, string | number | undefined> = { limit: fetch_limit, offset: 0 };
     if (gene) params["gene"] = gene;
     if (hgvs) params["hgvs"] = hgvs;
     if (caid) params["caid"] = caid;
@@ -505,12 +539,26 @@ server.registerTool(
     const url = `${EREPO_BASE}/summary/classifications${buildQS(params)}`;
     const raw = await fetchJSON<{ data?: ERepoRecord[] }>(url);
 
-    if (compact && raw?.data && Array.isArray(raw.data)) {
-      const compacted = raw.data.map(compactErepoRecord);
-      return { content: [{ type: "text", text: formatResult({ data: compacted }) }] };
+    let records: ERepoRecord[] = raw?.data ?? [];
+
+    // Client-side HGVS pattern filter
+    if (hgvs_contains && records.length > 0) {
+      records = records.filter((r) => hgvsMatches(r, hgvs_contains));
     }
 
-    return { content: [{ type: "text", text: formatResult(raw) }] };
+    // Apply result_limit after filtering
+    records = records.slice(0, result_limit);
+
+    if (compact) {
+      records = records.map(compactErepoRecord);
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: formatResult({ count: records.length, data: records }),
+      }],
+    };
   }
 );
 
