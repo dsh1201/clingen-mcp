@@ -419,17 +419,45 @@ server.registerTool(
 // ERepo – Evidence Repository
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Fields to strip in compact mode — these are verbose and rarely needed for overview queries
+const EREPO_VERBOSE_FIELDS = new Set([
+  "summaryDesc",      // full classification rationale text (can be 10KB+ per record)
+  "versionsList",     // historical version objects
+  "_rev",             // ArangoDB internal revision token
+  "pubMedArticles",   // raw PubMed article objects
+  "PCERDocID",        // internal submission ID
+  "geneNcbiId",       // redundant with gene symbol
+  "mondoId",          // redundant with condition
+]);
+
+type ERepoRecord = Record<string, unknown>;
+
+function compactErepoRecord(record: ERepoRecord): ERepoRecord {
+  const out: ERepoRecord = {};
+  for (const [k, v] of Object.entries(record)) {
+    if (EREPO_VERBOSE_FIELDS.has(k)) continue;
+    // Trim hgvs array to first 3 entries only
+    if (k === "hgvs" && Array.isArray(v)) {
+      out[k] = (v as unknown[]).slice(0, 3);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 server.registerTool(
   "erepo_query_classifications",
   {
     description:
       "Query the ClinGen Evidence Repository (ERepo) for expert-curated variant " +
       "classifications. Supports filtering by gene symbol, HGVS notation, CAid, " +
-      "ClinVar variation ID, expert panel name, disease/condition, or ACMG " +
-      "classification assertion. Returns classification records with: ACMG/AMP " +
-      "classification (Pathogenic/Likely Pathogenic/VUS/etc.), applied criteria codes, " +
-      "condition name, HGVS, CAid, and classification rationale. " +
-      "ERepo contains 10,527+ curated variants across 140+ genes (as of 2025).",
+      "ClinVar variation ID, expert panel name, disease/condition, or ACMG assertion. " +
+      "By default returns compact records with key fields only: caId, gene, hgvs, " +
+      "classification, condition, metCodes (applied ACMG/AMP criteria), unMetCodes, " +
+      "publishedDate. Set compact=false to include full summaryDesc rationale text. " +
+      "Use erepo_get_classification for one record's full detail. " +
+      "ERepo contains 12,000+ curated variants across 140+ genes.",
     inputSchema: {
       gene: z.string().optional().describe("Gene symbol, e.g. 'BRCA1'"),
       hgvs: z.string().optional().describe("HGVS expression, e.g. 'NM_007294.4:c.5266dup'"),
@@ -455,13 +483,17 @@ server.registerTool(
         .min(0)
         .default(0)
         .describe("Pagination offset"),
+      compact: z
+        .boolean()
+        .default(true)
+        .describe(
+          "If true (default), strips verbose fields (summaryDesc, versionsList, etc.) " +
+          "to keep response small. Set false only when you need full rationale text."
+        ),
     },
   },
-  async ({ gene, hgvs, caid, variation_id, expert_panel, condition, assertion, limit, offset }) => {
-    const params: Record<string, string | number | undefined> = {
-      limit,
-      offset,
-    };
+  async ({ gene, hgvs, caid, variation_id, expert_panel, condition, assertion, limit, offset, compact }) => {
+    const params: Record<string, string | number | undefined> = { limit, offset };
     if (gene) params["gene"] = gene;
     if (hgvs) params["hgvs"] = hgvs;
     if (caid) params["caid"] = caid;
@@ -471,8 +503,14 @@ server.registerTool(
     if (assertion) params["assertion"] = assertion;
 
     const url = `${EREPO_BASE}/summary/classifications${buildQS(params)}`;
-    const data = await fetchJSON(url);
-    return { content: [{ type: "text", text: formatResult(data) }] };
+    const raw = await fetchJSON<{ data?: ERepoRecord[] }>(url);
+
+    if (compact && raw?.data && Array.isArray(raw.data)) {
+      const compacted = raw.data.map(compactErepoRecord);
+      return { content: [{ type: "text", text: formatResult({ data: compacted }) }] };
+    }
+
+    return { content: [{ type: "text", text: formatResult(raw) }] };
   }
 );
 
