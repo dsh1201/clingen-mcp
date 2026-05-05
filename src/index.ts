@@ -63,6 +63,19 @@ function formatResult(data: unknown): string {
   return JSON.stringify(data, null, 2);
 }
 
+// Extract CAid (e.g. "CA16044437") from a full IRI or bare CAid string
+function extractCaid(iriOrCaid: string): string {
+  const m = iriOrCaid.match(/CA\d+/);
+  return m ? m[0] : (iriOrCaid.split("/").pop() ?? iriOrCaid);
+}
+
+// Fetch all linked data for a variant via the correct LDH /id/ endpoint
+async function fetchVariantLd(caid: string): Promise<Record<string, unknown>> {
+  const url = `${LDH_BASE}/Variant/id/${encodeURIComponent(caid)}/ld?detail=high`;
+  const resp = await fetchJSON<{ data?: Record<string, unknown> }>(url);
+  return (resp?.data ?? {}) as Record<string, unknown>;
+}
+
 // ─── Server ──────────────────────────────────────────────────────────────────
 const server = new McpServer({
   name: "clingen-mcp",
@@ -183,7 +196,8 @@ server.registerTool(
     },
   },
   async ({ iri }) => {
-    const url = `${LDH_BASE}/Variant${buildQS({ iri })}`;
+    const caid = extractCaid(iri);
+    const url = `${LDH_BASE}/Variant/id/${encodeURIComponent(caid)}/ld?detail=high`;
     const data = await fetchJSON(url);
     return { content: [{ type: "text", text: formatResult(data) }] };
   }
@@ -216,20 +230,26 @@ server.registerTool(
   {
     description:
       "Retrieve allele molecular consequence statements from the ClinGen Linked " +
-      "Data Hub (LDH) for a variant IRI. Returns computed functional consequences " +
-      "including splice effects, amino acid changes, and other molecular impacts " +
-      "from tools like SpliceAI and OpenCRAVAT.",
+      "Data Hub (LDH) for a variant. Returns preferred transcript consequences " +
+      "(missense, splice, etc.) from Ensembl VEP and RefSeq, including MANE Select " +
+      "transcript designation. Uses the correct LDH /Variant/id/{caid}/ld endpoint.",
     inputSchema: {
       iri: z
         .string()
         .url()
-        .describe("IRI of the variant entity (CAR allele IRI)"),
+        .describe("CAR allele IRI, e.g. 'http://reg.genome.network/allele/CA128085'"),
     },
   },
   async ({ iri }) => {
-    const url = `${LDH_BASE}/AlleleMolecularConsequenceStatement${buildQS({ iri })}`;
-    const data = await fetchJSON(url);
-    return { content: [{ type: "text", text: formatResult(data) }] };
+    const caid = extractCaid(iri);
+    const ld = await fetchVariantLd(caid);
+    const entries = ld["AlleleMolecularConsequenceStatement"];
+    if (!entries || (Array.isArray(entries) && (entries as unknown[]).length === 0)) {
+      return {
+        content: [{ type: "text", text: `No AlleleMolecularConsequenceStatement found in LDH for ${caid}.` }],
+      };
+    }
+    return { content: [{ type: "text", text: formatResult({ caid, AlleleMolecularConsequenceStatement: entries }) }] };
   }
 );
 
@@ -237,20 +257,58 @@ server.registerTool(
   "ldh_get_population_allele_frequency",
   {
     description:
-      "Retrieve population allele frequency statements from the ClinGen Linked " +
-      "Data Hub (LDH) for a variant IRI. Aggregates frequency data from " +
-      "GnomAD Exomes v4.1 (205M+ records) and GnomAD Genomes v4.1 (909M+ records).",
+      "Retrieve population allele frequency data from the ClinGen Linked Data Hub (LDH) " +
+      "for a variant. Returns gnomAD v4.1 Exome and Genome allele frequencies (AF, AC, AN), " +
+      "homozygote counts, grpMaxFAF95 (used for BA1/BS1 ACMG criteria), and per-ancestry " +
+      "subcohort frequencies. Uses the correct LDH /Variant/id/{caid}/ld endpoint.",
     inputSchema: {
       iri: z
         .string()
         .url()
-        .describe("IRI of the variant entity (CAR allele IRI)"),
+        .describe("CAR allele IRI, e.g. 'http://reg.genome.network/allele/CA128085'"),
     },
   },
   async ({ iri }) => {
-    const url = `${LDH_BASE}/PopulationAlleleFrequencyStatement${buildQS({ iri })}`;
-    const data = await fetchJSON(url);
-    return { content: [{ type: "text", text: formatResult(data) }] };
+    const caid = extractCaid(iri);
+    const ld = await fetchVariantLd(caid);
+    const exomes = ld["GnomADExomesV4.1"];
+    const genomes = ld["GnomADGenomesV4.1"];
+    if (!exomes && !genomes) {
+      return {
+        content: [{ type: "text", text: `No gnomAD frequency data found in LDH for ${caid}.` }],
+      };
+    }
+
+    // Extract a compact frequency summary from a gnomAD entry
+    type GnomEntry = { entContent?: { gks_va_freq?: Record<string, unknown> } };
+    function freqSummary(entries: unknown) {
+      const arr = Array.isArray(entries) ? entries as GnomEntry[] : [entries as GnomEntry];
+      const freq = arr[0]?.entContent?.gks_va_freq;
+      if (!freq) return null;
+      const anc = freq.ancillaryResults as Record<string, unknown> | undefined;
+      return {
+        alleleFrequency: freq.alleleFrequency,
+        focusAlleleCount: freq.focusAlleleCount,
+        locusAlleleCount: freq.locusAlleleCount,
+        homozygotes: anc?.homozygotes,
+        grpMaxFAF95: anc?.grpMaxFAF95,
+        jointFreq: anc?.jointFreq,
+        derivedFrom: freq.derivedFrom,
+        qualityMeasures: freq.qualityMeasures,
+        subcohortFrequency: freq.subcohortFrequency,
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: formatResult({
+          caid,
+          gnomAD_Exomes_v4_1: exomes ? freqSummary(exomes) : null,
+          gnomAD_Genomes_v4_1: genomes ? freqSummary(genomes) : null,
+        }),
+      }],
+    };
   }
 );
 
@@ -258,21 +316,40 @@ server.registerTool(
   "ldh_get_insilico_prediction",
   {
     description:
-      "Retrieve in-silico prediction score statements from the ClinGen Linked " +
-      "Data Hub (LDH) for a variant IRI. Returns computational pathogenicity " +
-      "prediction scores such as REVEL (77M+ records indexed), used as evidence " +
-      "in ACMG/AMP variant classification (PP3/BP4 criteria).",
+      "Retrieve in-silico pathogenicity prediction scores from the ClinGen Linked Data Hub " +
+      "(LDH) for a variant. Returns REVEL scores per transcript (including MANE Select), plus " +
+      "CADD and M-CAP scores when available. REVEL ≥0.932 supports PP3 (pathogenic); " +
+      "REVEL ≤0.016 supports BP4 (benign) per ACMG/AMP guidelines. " +
+      "Uses the correct LDH /Variant/id/{caid}/ld endpoint.",
     inputSchema: {
       iri: z
         .string()
         .url()
-        .describe("IRI of the variant entity (CAR allele IRI)"),
+        .describe("CAR allele IRI, e.g. 'http://reg.genome.network/allele/CA128085'"),
     },
   },
   async ({ iri }) => {
-    const url = `${LDH_BASE}/InSilicoPredictionScoreStatement${buildQS({ iri })}`;
-    const data = await fetchJSON(url);
-    return { content: [{ type: "text", text: formatResult(data) }] };
+    const caid = extractCaid(iri);
+    const ld = await fetchVariantLd(caid);
+    const revel = ld["RevelScore"];
+    const insilico = ld["InSilicoPredictionScoreStatement"];
+    const inSilicoEmbedded = ld["InSilicoPredictionScoreStatementEmbedded"];
+    if (!revel && !insilico && !inSilicoEmbedded) {
+      return {
+        content: [{ type: "text", text: `No in-silico prediction scores found in LDH for ${caid}.` }],
+      };
+    }
+    return {
+      content: [{
+        type: "text",
+        text: formatResult({
+          caid,
+          RevelScore: revel ?? null,
+          InSilicoPredictionScoreStatement: insilico ?? null,
+          InSilicoPredictionScoreStatementEmbedded: inSilicoEmbedded ?? null,
+        }),
+      }],
+    };
   }
 );
 
