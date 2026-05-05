@@ -20,11 +20,11 @@ MCP server for the [ClinGen API platform](https://doi.org/10.1016/j.xgen.2026.10
 
 ### LDH – Linked Data Hub
 - `ldh_get_service_info` — Service metadata, entity types, external datasets
-- `ldh_get_variant` — Variant entity with linked evidence
+- `ldh_get_variant` — All linked evidence for a variant (gnomAD, REVEL, VEP, CIViC, MaveDB)
 - `ldh_get_gene` — Gene entity record
-- `ldh_get_allele_molecular_consequence` — Splice/amino acid consequence statements
-- `ldh_get_population_allele_frequency` — GnomAD population frequency aggregates
-- `ldh_get_insilico_prediction` — REVEL and other in-silico prediction scores
+- `ldh_get_allele_molecular_consequence` — Preferred transcript consequences from Ensembl VEP and RefSeq (including MANE Select)
+- `ldh_get_population_allele_frequency` — gnomAD v4.1 Exome and Genome frequencies: AF, AC, AN, homozygote counts, grpMaxFAF95, and per-ancestry subcohort breakdown
+- `ldh_get_insilico_prediction` — REVEL scores per transcript (MANE Select flagged), CADD, M-CAP
 
 ### CSpec – Criteria Specification Registry
 - `cspec_list_specifications` — List all 200+ ACMG/AMP specifications
@@ -77,10 +77,23 @@ cspec_search_by_gene("BRCA1")
 # Query all pathogenic BRCA1 variants
 erepo_query_classifications(gene="BRCA1", assertion="Pathogenic")
 
-# Get population frequency data
-ldh_get_variant("http://reg.genome.network/allele/CA128085")
+# Get gnomAD v4.1 frequencies (AF, AC, AN, grpMaxFAF95, per-ancestry)
 ldh_get_population_allele_frequency("http://reg.genome.network/allele/CA128085")
+
+# Get REVEL score (MANE Select), CADD, M-CAP
+ldh_get_insilico_prediction("http://reg.genome.network/allele/CA128085")
+
+# Get Ensembl VEP / RefSeq molecular consequence
+ldh_get_allele_molecular_consequence("http://reg.genome.network/allele/CA128085")
 ```
+
+## LDH API Notes
+
+The LDH sub-tools (`ldh_get_population_allele_frequency`, `ldh_get_insilico_prediction`, `ldh_get_allele_molecular_consequence`) use the LDH `/Variant/id/{caid}/ld?detail=high` endpoint — **not** the `?iri=` query parameter form.
+
+The `?iri=` form only returns service-level statistics (`ldPerEnt` counts) and does not embed actual variant data. The `/id/` path format is required to retrieve real gnomAD frequencies, REVEL scores, and VEP consequence records.
+
+If a tool returns "No data found", it means LDH genuinely has no record of that type for the variant — not a lookup error. Coverage varies: gnomAD v4.1 covers ~1.6 billion alleles, REVEL covers ~78M records, and VEP consequence statements cover ~14M variants.
 
 ## Data Sources
 - CAR: https://reg.clinicalgenome.org/ — 2.96 billion registered variants (June 2025)
