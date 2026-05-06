@@ -154,10 +154,22 @@ function compactEntityType(entityType: string, rawData: unknown): unknown {
     }
 
     case "VariantsInLiterature": {
-      const pmids = entries
-        .map(e => { const c = (e?.entContent ?? e) as AnyRec; return c.pmid ?? c.PMID ?? c.id; })
-        .filter(Boolean);
-      return { recordCount: entries.length, pmids: pmids.slice(0, 20) };
+      // Structure: entContent.publicationIds.{PMID, PMCID, DOI} + entContent.publicationType
+      return {
+        recordCount: entries.length,
+        publications: entries.slice(0, 30).map(e => {
+          const c = (e?.entContent ?? e) as AnyRec;
+          const ids = c.publicationIds as AnyRec | undefined;
+          const annotations = c.annotations as unknown[] | undefined;
+          return {
+            pmid: ids?.PMID ?? null,
+            pmcid: ids?.PMCID ?? e.entId ?? null,
+            doi: ids?.DOI ?? null,
+            publicationType: c.publicationType,
+            annotationCount: Array.isArray(annotations) ? annotations.length : 0,
+          };
+        }),
+      };
     }
 
     case "PathogenicityClassification": {
