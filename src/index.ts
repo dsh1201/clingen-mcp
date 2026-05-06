@@ -76,6 +76,183 @@ async function fetchVariantLd(caid: string): Promise<Record<string, unknown>> {
   return (resp?.data ?? {}) as Record<string, unknown>;
 }
 
+// Compact formatters for each known LDH entity type (used in overview mode)
+function compactEntityType(entityType: string, rawData: unknown): unknown {
+  type AnyRec = Record<string, unknown>;
+  const entries: AnyRec[] = Array.isArray(rawData)
+    ? (rawData as AnyRec[])
+    : [rawData as AnyRec];
+
+  switch (entityType) {
+    case "GnomADExomesV4.1":
+    case "GnomADGenomesV4.1": {
+      return entries.map(e => {
+        const freq = (e?.entContent as AnyRec | undefined)?.gks_va_freq as AnyRec | undefined;
+        if (!freq) return e;
+        const anc = (freq.ancillaryResults ?? {}) as AnyRec;
+        const sub = freq.subcohortFrequency;
+        return {
+          alleleFrequency:  freq.alleleFrequency,
+          focusAlleleCount: freq.focusAlleleCount,
+          locusAlleleCount: freq.locusAlleleCount,
+          homozygotes:      anc.homozygotes,
+          grpMaxFAF95:      anc.grpMaxFAF95,
+          jointFreq:        anc.jointFreq,
+          subcohortCount:   Array.isArray(sub) ? (sub as unknown[]).length : 0,
+        };
+      });
+    }
+
+    case "RevelScore":
+      return entries.map(e => e?.entContent ?? e);
+
+    case "AlleleMolecularConsequenceStatement": {
+      return entries.map(e => {
+        const c = (e?.entContent ?? e) as AnyRec;
+        // Structure: { preferredTranscripts: [...] }
+        const transcripts = c.preferredTranscripts as AnyRec[] | undefined;
+        if (Array.isArray(transcripts)) {
+          return {
+            transcriptCount: transcripts.length,
+            preferredTranscripts: transcripts.map(t => ({
+              id: t.id, molecularConsequence: t.molecularConsequence,
+              source: t.source, biotype: t.biotype, manePreferredRefSeq: t.manePreferredRefSeq,
+            })),
+          };
+        }
+        const keys = Object.keys(c);
+        return { topLevelFields: keys, note: `Use entity_types=['${entityType}'] for full data` };
+      });
+    }
+
+    case "PopulationAlleleFrequencyStatement": {
+      // Structure: { population, alleleFrequency, alleleCount, alleleNumber, method, faf95, faf99, ... }
+      return {
+        recordCount: entries.length,
+        records: entries.slice(0, 25).map(e => {
+          const c = (e?.entContent ?? e) as AnyRec;
+          return {
+            population: c.population,
+            method: c.method,
+            alleleFrequency: c.alleleFrequency,
+            alleleCount: c.alleleCount,
+            alleleNumber: c.alleleNumber,
+            faf95: c.faf95,
+            homozygousCount: c.homozygousAlleleIndividualCount,
+          };
+        }),
+        note: `Use entity_types=['PopulationAlleleFrequencyStatement'] for full records`,
+      };
+    }
+
+    case "PopulationAlleleFrequencySource": {
+      // Structure: top-level keys are source names (e.g. "gnomad-exomes", "gnomad-genomes")
+      return entries.map(e => {
+        const c = (e?.entContent ?? e) as AnyRec;
+        return { sources: Object.keys(c) };
+      });
+    }
+
+    case "VariantsInLiterature": {
+      const pmids = entries
+        .map(e => { const c = (e?.entContent ?? e) as AnyRec; return c.pmid ?? c.PMID ?? c.id; })
+        .filter(Boolean);
+      return { recordCount: entries.length, pmids: pmids.slice(0, 20) };
+    }
+
+    case "PathogenicityClassification": {
+      return entries.map(e => {
+        const c = (e?.entContent ?? e) as AnyRec;
+        return { classification: c.classification ?? c.label, source: c.source ?? c.owner, date: c.date ?? c.approvedDate };
+      });
+    }
+
+    case "BrcaExchangeRecord": {
+      return entries.map(e => {
+        const c = (e?.entContent ?? e) as AnyRec;
+        return { bxId: c.bxId ?? c.id, clinicalSignificance: c.clinicalSignificance, alleleFrequency: c.alleleFrequency };
+      });
+    }
+
+    case "CivicEvidence": {
+      return {
+        recordCount: entries.length,
+        summary: entries.slice(0, 10).map(e => {
+          const c = (e?.entContent ?? e) as AnyRec;
+          return { id: c.id, evidenceLevel: c.evidenceLevel, clinicalSignificance: c.clinicalSignificance };
+        }),
+      };
+    }
+
+    case "MaveDBMapping": {
+      return entries.map(e => {
+        const c = (e?.entContent ?? e) as AnyRec;
+        return { urn: c.urn, score: c.functionalScore ?? c.score };
+      });
+    }
+
+    case "InSilicoPredictionScoreStatement":
+    case "InSilicoPredictionScoreStatementEmbedded": {
+      return entries.map(e => {
+        const c = (e?.entContent ?? e) as AnyRec;
+        // Structure: { predictors: [...] }
+        const predictors = c.predictors as AnyRec[] | undefined;
+        if (Array.isArray(predictors)) {
+          return {
+            predictorCount: predictors.length,
+            predictors: predictors.map(p => ({
+              label: p.label ?? p.toolName ?? p.name,
+              score: p.score,
+              classification: p.classification ?? p.prediction,
+              transcript: p.transcript,
+            })),
+          };
+        }
+        const keys = Object.keys(c);
+        return keys.length > 0
+          ? { fields: keys, note: `Use entity_types=['${entityType}'] for full data` }
+          : { note: "Empty record" };
+      });
+    }
+
+    case "OpenCRAVAT": {
+      // Extract only key clinical predictors to keep response manageable
+      const CLINICAL_TOOLS = [
+        "cadd", "revel", "sift", "polyphen2", "bayesdel", "alphamissense",
+        "dann_coding", "metarnn", "mutpred2", "vest", "esm1b", "spliceai",
+        "clinvar", "cardioboost", "clinvar_acmg",
+      ];
+      return entries.map(e => {
+        const c = (e?.entContent ?? e) as AnyRec;
+        const summary: AnyRec = {};
+        const crx = c.crx as AnyRec | undefined;
+        if (crx) {
+          summary.variantInfo = {
+            gene: crx.hugo, transcript: crx.transcript,
+            cchange: crx.cchange, achange: crx.achange, so: crx.so, exonno: crx.exonno,
+          };
+        }
+        for (const tool of CLINICAL_TOOLS) {
+          if (tool in c) summary[tool] = c[tool];
+        }
+        const allTools = Object.keys(c).filter(k => k !== "crx" && k !== "module_versions");
+        summary.allAnnotators = allTools;
+        summary.note = `Use entity_types=['OpenCRAVAT'] for all ${allTools.length} annotators`;
+        return summary;
+      });
+    }
+
+    default: {
+      const keys = entries[0] && typeof entries[0] === "object" ? Object.keys(entries[0] as object) : [];
+      return {
+        recordCount: entries.length,
+        topLevelFields: keys,
+        note: `Use entity_types=['${entityType}'] for full data`,
+      };
+    }
+  }
+}
+
 // ─── Server ──────────────────────────────────────────────────────────────────
 const server = new McpServer({
   name: "clingen-mcp",
@@ -181,25 +358,76 @@ server.registerTool(
   "ldh_get_variant",
   {
     description:
-      "Retrieve a variant entity record from the ClinGen Linked Data Hub (LDH) " +
-      "by its IRI (typically a CAR allele IRI). LDH aggregates evidence from " +
-      "external databases: GnomAD population frequencies, REVEL in-silico prediction " +
-      "scores, BRCA Exchange records, CIViC evidence, and MaveDB mappings. " +
-      "Example IRI: 'http://reg.genome.network/allele/CA128085'",
+      "Retrieve variant linked data from the ClinGen Linked Data Hub (LDH). " +
+      "Operates in two modes:\n" +
+      "OVERVIEW MODE (omit entity_types): Returns compact summaries of ALL available " +
+      "entity types in one response — key fields only to stay within size limits. " +
+      "Safe to call for any variant regardless of data volume.\n" +
+      "SELECTIVE MODE (provide entity_types): Returns full uncompressed data for only " +
+      "the listed entity types. Use when you need complete detail for 1–3 types.\n" +
+      "Known entity types: AlleleMolecularConsequenceStatement, BrcaExchangeRecord, " +
+      "CivicEvidence, GnomADExomesV4.1, GnomADGenomesV4.1, InSilicoPredictionScoreStatement, " +
+      "InSilicoPredictionScoreStatementEmbedded, MaveDBMapping, OpenCRAVAT, " +
+      "PathogenicityClassification, PopulationAlleleFrequencySource, " +
+      "PopulationAlleleFrequencyStatement, RevelScore, VariantsInLiterature.",
     inputSchema: {
       iri: z
         .string()
-        .url()
+        .min(3)
         .describe(
-          "IRI of the variant entity from CAR, e.g. 'http://reg.genome.network/allele/CA128085'"
+          "CAR allele IRI or bare CAid, e.g. 'http://reg.genome.network/allele/CA128085' or 'CA128085'"
+        ),
+      entity_types: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Selective mode: entity type names to return in full. " +
+          "Example: ['GnomADExomesV4.1', 'RevelScore']"
         ),
     },
   },
-  async ({ iri }) => {
+  async ({ iri, entity_types }) => {
     const caid = extractCaid(iri);
     const url = `${LDH_BASE}/Variant/id/${encodeURIComponent(caid)}/ld?detail=high`;
-    const data = await fetchJSON(url);
-    return { content: [{ type: "text", text: formatResult(data) }] };
+    const data = await fetchJSON<{ data?: Record<string, unknown> }>(url);
+    const allData = (data?.data ?? {}) as Record<string, unknown>;
+
+    if (entity_types && entity_types.length > 0) {
+      // Selective mode: full data for requested types only
+      const filtered: Record<string, unknown> = {};
+      for (const t of entity_types) {
+        if (t in allData) filtered[t] = allData[t];
+      }
+      const notFound = entity_types.filter(t => !(t in allData));
+      return {
+        content: [{
+          type: "text",
+          text: formatResult({
+            caid,
+            data: filtered,
+            ...(notFound.length > 0 ? { notFound } : {}),
+          }),
+        }],
+      };
+    }
+
+    // Overview mode: compact summary of every available entity type
+    const summary: Record<string, unknown> = {};
+    for (const [entityType, rawData] of Object.entries(allData)) {
+      summary[entityType] = compactEntityType(entityType, rawData);
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: formatResult({
+          caid,
+          entityTypesAvailable: Object.keys(allData),
+          compactSummary: summary,
+          hint: "Call again with entity_types=[...] for full detail of specific types.",
+        }),
+      }],
+    };
   }
 );
 
