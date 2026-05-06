@@ -20,7 +20,7 @@ MCP server for the [ClinGen API platform](https://doi.org/10.1016/j.xgen.2026.10
 
 ### LDH – Linked Data Hub
 - `ldh_get_service_info` — Service metadata, entity types, external datasets
-- `ldh_get_variant` — All linked evidence for a variant (gnomAD, REVEL, VEP, CIViC, MaveDB)
+- `ldh_get_variant` — Linked evidence overview for a variant; see [two-mode usage](#ldh_get_variant-two-mode-usage) below
 - `ldh_get_gene` — Gene entity record
 - `ldh_get_allele_molecular_consequence` — Preferred transcript consequences from Ensembl VEP and RefSeq (including MANE Select)
 - `ldh_get_population_allele_frequency` — gnomAD v4.1 Exome and Genome frequencies: AF, AC, AN, homozygote counts, grpMaxFAF95, and per-ancestry subcohort breakdown
@@ -77,6 +77,12 @@ cspec_search_by_gene("BRCA1")
 # Query all pathogenic BRCA1 variants
 erepo_query_classifications(gene="BRCA1", assertion="Pathogenic")
 
+# Overview: see all available entity types + compact summaries (safe for any variant)
+ldh_get_variant("CA128085")
+
+# Selective: get full detail for specific entity types only
+ldh_get_variant("CA128085", entity_types=["GnomADExomesV4.1", "RevelScore"])
+
 # Get gnomAD v4.1 frequencies (AF, AC, AN, grpMaxFAF95, per-ancestry)
 ldh_get_population_allele_frequency("http://reg.genome.network/allele/CA128085")
 
@@ -86,6 +92,49 @@ ldh_get_insilico_prediction("http://reg.genome.network/allele/CA128085")
 # Get Ensembl VEP / RefSeq molecular consequence
 ldh_get_allele_molecular_consequence("http://reg.genome.network/allele/CA128085")
 ```
+
+## `ldh_get_variant` Two-Mode Usage
+
+LDH variant data can exceed 1 MB for some variants (e.g. 27 literature records with full annotation text, or 54-annotator OpenCRAVAT reports). `ldh_get_variant` handles this with two modes:
+
+### Overview Mode (default — no `entity_types`)
+
+Returns compact summaries of **all available entity types** in one response. Safe to call for any variant.
+
+```
+ldh_get_variant("CA126713")
+```
+
+Returns:
+- `entityTypesAvailable` — list of entity types present for this variant
+- `compactSummary` — per-entity-type condensed output:
+
+| Entity Type | Compact Output |
+|---|---|
+| `GnomADExomesV4.1` / `GnomADGenomesV4.1` | AF, AC, AN, homozygotes, grpMaxFAF95, jointFreq, subcohort count |
+| `RevelScore` | Score and transcript for each entry (MANE Select flagged) |
+| `AlleleMolecularConsequenceStatement` | Transcript count + id/consequence/source/biotype per transcript |
+| `InSilicoPredictionScoreStatement` | Predictor count + score per predictor |
+| `OpenCRAVAT` | variantInfo + 15 key clinical tools (CADD, REVEL, SIFT, PolyPhen2, BayesDel, AlphaMissense…) + full annotator list |
+| `PathogenicityClassification` | Classification label |
+| `PopulationAlleleFrequencyStatement` | Per-population AF/AC/AN/faf95/homozygousCount (up to 25 records) |
+| `PopulationAlleleFrequencySource` | Source dataset names |
+| `VariantsInLiterature` | Per-publication PMID/PMCID/DOI/type/annotationCount (up to 30 records) |
+| `BrcaExchangeRecord` | bxId + clinical significance |
+| `CivicEvidence` | Evidence count + level/significance per entry |
+| `MaveDBMapping` | URN + functional score |
+| Unknown types | Top-level field names + record count |
+
+### Selective Mode (`entity_types` provided)
+
+Returns **full uncompressed data** for only the listed entity types. Use when you need complete detail that the compact summary omits (e.g. gnomAD per-ancestry subcohort breakdown, full OpenCRAVAT annotator set).
+
+```
+ldh_get_variant("CA126713", entity_types=["RevelScore"])
+ldh_get_variant("CA015944", entity_types=["GnomADExomesV4.1", "PopulationAlleleFrequencyStatement"])
+```
+
+> **Note:** Some individual entity types are themselves >1 MB (e.g. `VariantsInLiterature` with many annotated publications, `OpenCRAVAT` with 54 annotators). For gnomAD frequencies use `ldh_get_population_allele_frequency`; for REVEL/CADD use `ldh_get_insilico_prediction` — both return pre-extracted compact data.
 
 ## LDH API Notes
 
